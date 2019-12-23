@@ -1,0 +1,544 @@
+import pandas as pd
+from pymongo import MongoClient
+import re
+from dateutil.parser import parse
+import datetime
+client = MongoClient('mongodb://TapsiumUser:Tapsium%40123@10.119.11.192',5005)
+
+db = client.Tapsium
+collection = db.Defects
+col=db.JiraDefectsInfo
+git_col=db.GitLog
+
+
+jira_df=pd.DataFrame(list(col.find()))   
+git_df=pd.DataFrame(list(git_col.find())) 
+data_df = pd.DataFrame(list(collection.find()))   
+data_df.dtypes
+
+git_df['jira']='null'
+for i in range(len(git_df)):
+    print(i)
+    a=git_df['timeStamp'][i]
+    d=parse(a)
+    d=d.strftime("%m/%d/%Y")
+
+    st=d.split('/')
+  
+# date in yyyy/mm/dd format 
+    d1 = datetime.datetime(int(st[-1]),int(st[0]),int(st[1]))
+    d2 = datetime.datetime(2019, 10, 23)
+    d3 = datetime.datetime(2019, 11, 18)
+    if(d1<=d2):
+        git_df['jira'][i]='train'
+    elif(d1>d2)&(d1<=d3):
+        git_df['jira'][i]='test'
+    else:
+        git_df['jira'][i]='null'
+    
+git_train=git_df[git_df['jira']=='train']
+git_test=git_df[git_df['jira']=='test']
+
+p=r'(EJIVA-\d{1,5}|CXTDT-\d{1,5}|OTHK-\d{1-5})'
+
+
+def Getting_defect_info(data):
+    
+    dg=['defectId','collectionName','locationCode','testDescription']
+    st=[]
+    df=pd.DataFrame()
+    for i in range(len(data)):
+        new_df=pd.DataFrame()
+        str=data['defectId'][i]
+        st=re.findall(p,str)    
+        sc=pd.DataFrame(data=data['scenarios'][i])
+        sc.dtypes
+        if(len(st)==0):
+            sc['defectId']='null'
+        else:
+            sc['defectId']=st[0]
+        sc['buildDate']=data['buildDate'][i]
+        dg=list(sc.columns)
+        if 'locationCode' in dg:
+            new_df['locationCode']=sc['locationCode']
+        else:
+            new_df['locationCode']='null'
+        new_df['buildDate']=sc['buildDate']
+        new_df['defectId']=sc['defectId']
+        new_df['collectionName']=sc['collectionName']
+        new_df['testDescription']=sc['testDescription']
+        df=pd.concat([df,new_df],axis=0).reset_index(drop=True)
+    
+    final_df=df[['buildDate','defectId','locationCode','collectionName','testDescription']]
+    final_df=final_df.groupby(['defectId'])['testDescription'].unique()
+    final_df=pd.DataFrame(data=final_df).reset_index(drop=False)
+    print('Getting_defect_info')
+    return final_df
+
+def Merge_Jira_data_df(jira_def,a):
+    jira_def.rename(columns={'key':'defectId'},inplace=True)
+    result = pd.merge(jira_def,a[['defectId', 'testDescription']],
+                 on='defectId')
+    result=result[['defectId','assignee','transition','testDescription']]
+    print('Merge_Jira_data_df')
+    return result
+
+def Defects_from_Jira_Git(result,git_fil):
+    jira_new_df=pd.DataFrame()
+    print(len(result))
+    result=result[result['transition'].notnull()].reset_index(drop=True)
+    p=len(result)
+    print(p)
+    for i in range(p):
+        sub=result['transition'][i]
+        dum=pd.DataFrame()
+        for j in range(len(sub)):
+            dum=pd.DataFrame(data=sub[j],index=[i])
+            dum['defectId']=result['defectId'][i]
+            dum['assignee']=result['assignee'][i]
+            test_list=list(result['testDescription'][i])
+    
+            if(len(test_list)>1):
+                test= [' '.join(test_list[0 : -1])]
+            else:
+                test=test_list[0]
+            dum['testDescription']=test
+            jira_new_df=pd.concat([jira_new_df,dum],axis=0).reset_index(drop=True)
+    
+    jira_new_df=jira_new_df[jira_new_df['to']=='Retest']
+    jira_new_df.dtypes
+    jira_new_df=jira_new_df[['defectId','assignee','author','to','created','testDescription']]    
+    print("jira_new_df",len(jira_new_df))
+    
+    git=git_fil[['author','fileNames','timeStamp']]
+    
+    mylambda= lambda x: len(x)!=0
+    git=git.loc[git['fileNames'].apply(mylambda)].reset_index(drop=True)
+    print("git",len(git))
+    for i in range(len(git)):
+        d=git['author'][i].split('\\')
+        if(len(d)>1):
+            git['author'][i]=''.join(d[1])
+
+    final_result = pd.merge(jira_new_df,git[['author', 'fileNames','timeStamp']],on='author')
+    print('final result',len(final_result))
+
+    from dateutil.parser import parse
+    final_result['Time_difference']=0
+    for i in range(len(final_result)):
+        
+#    c=c.strftime("%m/%d/%Y %H:%M:%S")
+        c=parse(final_result['timeStamp'][i])
+        c=c.strftime("%m/%d/%Y %H:%M:%S")
+        a = time.strptime(c, '%m/%d/%Y %H:%M:%S')
+#    b = time.strptime(c, '%m/%d/%Y %H:%M:%S')
+        a = time.mktime(a)
+#    b = time.mktime(b)
+        d=final_result['created'][i]
+        d=parse(d)
+        d=d.strftime("%m/%d/%Y %H:%M:%S")
+        
+        b = time.strptime(d, '%m/%d/%Y %H:%M:%S')
+#        c= parse(c.strftime("%m/%d/%Y %H:%M:%S"))
+        b = time.mktime(b)
+        
+        d=abs(a-b)
+        dif=int(d)/ 86400       
+#        if((dif>0)&(dif<=2)):
+        final_result.loc[i,'Time_difference']=dif
+    
+    vd=final_result[(final_result['Time_difference']<=2) & (final_result['Time_difference']>0)]
+    vd=vd[['defectId','fileNames','testDescription']].reset_index(drop=True)
+    print('Defects_from_Jira_Git')
+    print(len(vd))
+    return vd
+
+def Defects_from_Jira_Git_DB(git_fil,a,vd):
+    data =git_fil            
+    mylambda = lambda x: len(x)!=0
+    data=data.loc[data['defectId'].apply(mylambda)]
+    mylambda= lambda x: x!='[]'
+    data=data.loc[data['fileNames'].apply(mylambda)]
+    data=data[['defectId','fileNames']].reset_index(drop=True)
+    def_git = pd.merge(data,
+                 a[['defectId', 'testDescription']],
+                 on='defectId')
+    total_defects=pd.concat([vd,def_git],axis=0,ignore_index=False).reset_index(drop=True)
+    print('Defects_from_Jira_Git_DB')
+    print(len(total_defects))
+    return total_defects
+
+import numpy as np
+def Defects_Preprocessing(total_defects):
+    df=total_defects
+    v=list(df['defectId'].unique())
+    my_list = list(range(0,len(v)))
+    dum_1=pd.DataFrame(columns=['defectId','fileNames'],index=my_list)
+    for i in range(len(dum_1)):
+        a=v[i]
+        d=[]
+        for j in range(len(df)):
+            b=df['defectId'][j]
+            c=df['fileNames'][j]
+            if(a==b):
+                d=list(np.unique(d+c))
+            else:
+                continue
+        dum_1['defectId'][i]=a
+        dum_1['fileNames'][i]=d
+   
+    dum_2=pd.DataFrame(columns=['defectId','testDescription'],index=my_list)
+    for i in range(len(dum_1)):
+        a=v[i]
+        d=""
+        for j in range(len(df)):
+            b=df['defectId'][j]
+            c=df['testDescription'][j]
+            if(a==b):
+                d=d+' '+c
+            else:
+                continue
+        dum_2['defectId'][i]=a
+        dum_2['testDescription'][i]=d
+            
+    f=pd.merge(dum_1,dum_2, on='defectId')
+    print('Defects_Preprocessing')
+    len(f)
+    return f
+
+
+def Diff(li1, li2): 
+    return (list(set(li1) - set(li2))) 
+
+
+def Diff_and(li1, li2): 
+    return (list(set(li1) & set(li2))) 
+
+def train_preprocess(final_defects_data):
+    data=final_defects_data
+    mylambda = lambda x: len(x)!=0
+    data=data.loc[data['fileNames'].apply(mylambda)].reset_index(drop=True)
+    total_files=data['fileNames']
+
+    files=[]
+    for i in range(len(total_files)):
+        z=total_files[i]
+        for j in range(len(z)):
+            inp=z[j]
+            inp=inp.replace('[',' ')
+            p=inp.replace(']',' ')
+            files.append(p.strip())
+
+    import numpy as np
+    total_tests=data['testDescription']
+    tests=[]
+    for i in range(len(total_tests)):
+        z=total_tests[i]
+        if(type(z)==np.ndarray):
+            for j in range(len(z)):
+                inp=z[j]
+                inp=inp.replace('[',' ')
+                p=inp.replace(']',' ')
+                tests.append(p.strip())
+        else:
+            inp=z.replace('[',' ')
+            p=inp.replace(']',' ')
+            tests.append(p.strip())
+        
+    all_tests=[]
+    for i in range(len(tests)):
+        c=tests[i]
+        c=c.split(' ')      
+        for j in range(len(c)):
+            if(len(c[j])>=30):
+                all_tests.append(c[j].strip())
+
+    tests=all_tests           
+    for i in range(len(tests)):
+        inp=tests[i].strip()
+        p=r'^\d{1,5}_'
+        p = re.sub(p, " ", inp)
+        tests[i]=p.strip()
+
+    files = list(dict.fromkeys(files))
+    tests=list(dict.fromkeys(tests))
+
+    columns=files+tests
+    index=data.index
+    pre=pd.DataFrame(index=index)
+
+    pre.columns
+
+    for i in range(len(data)):
+        c=data['fileNames'][i]
+        for j in range(len(c)):
+            pre.loc[i,c[j].strip()]=1
+            
+    m=data['testDescription']
+    for i in range(len(m)):
+        z=data['testDescription'][i]
+        q=r'^\d{1,5}_'
+        if(type(z)==np.ndarray):
+            for j in range(len(z)):
+                inp=z[j]
+                inp=inp.replace('[',' ')
+                p=inp.replace(']',' ').strip()
+                c=p.split(' ')
+                for k in range(len(c)):
+                    if(len(c[k])>=30):
+                        p = re.sub(q, " ", c[k])
+                        pre.loc[i,p.strip()]=1
+            
+        else:
+            inp=z.replace('[',' ')
+            inp=inp.replace(']',' ')
+            c=z.split(' ')
+            for k in range(len(c)):
+                if(len(c[k])>=30):
+                    p = re.sub(q, " ", c[k])
+                    pre.loc[i,p.strip()]=1
+    l=list(pre.columns )      
+    df=pre
+    df = df.loc[:,~df.columns.duplicated()]
+    pr=list(df.columns)
+
+    li1 = pr
+    li2 = columns
+
+    cd=Diff_and(li1, li2)
+
+#pre=pre.drop(cd, axis=1)
+
+    pre=pre.fillna(0)
+
+    x=pre.iloc[:,0:len(files)]
+    y=pre.iloc[:,len(files):]
+
+    return x,y
+
+import time
+def Test_data_get(git_fil):
+    git_fil=git_df
+    test=git_fil[['fileNames','timeStamp']]
+#    c=parse(test['timeStamp'][19])
+    d =datetime.datetime.today()
+#    c= parse(c.strftime("%m/%d/%Y %H:%M:%S"))
+    d=d.strftime("%m/%d/%Y %H:%M:%S")
+#    c=c.strftime("%m/%d/%Y %H:%M:%S")
+    a = time.strptime(d, '%m/%d/%Y %H:%M:%S')
+#    b = time.strptime(c, '%m/%d/%Y %H:%M:%S')
+    a = time.mktime(a)
+#    b = time.mktime(b)
+#    d=a-b
+#    hours = int(d) / 3600 % 24
+    mylambda = lambda x: len(x)!=0
+
+    test=test.loc[test['fileNames'].apply(mylambda)].reset_index(drop=True)
+
+    test['difference']=0
+    for i in range(len(test)):
+        c=parse(test.loc[i,'timeStamp'])
+        c=c.strftime("%m/%d/%Y %H:%M:%S")
+        b = time.strptime(c, '%m/%d/%Y %H:%M:%S')
+#        c= parse(c.strftime("%m/%d/%Y %H:%M:%S"))
+        b = time.mktime(b)
+        d=abs(a-b)
+        hours=int(d)/ 86400
+#        if ((hours>0)&(hours<=24)):
+        test.loc[i,'difference']=hours
+        
+    test=test[(test['difference']<=10) & (test['difference']>0)]
+    return test
+
+def test_data_preprocessed(test_git_df,x,y):
+    data=test_git_df
+    mylambda = lambda x: len(x)!=0
+
+    data=data.loc[data['fileNames'].apply(mylambda)].reset_index(drop=True)
+
+    total_files=data['fileNames']
+
+    t_files=[]
+    for i in range(len(total_files)):
+        z=total_files[i]
+        for j in range(len(z)):
+            inp=z[j]
+            inp=inp.replace('[',' ')
+            p=inp.replace(']',' ')
+            t_files.append(p.strip())
+    t_files = list(dict.fromkeys(t_files))
+
+
+    test_with_past=Diff_and(t_files,x.columns)
+
+    test_list_set = set(t_files) 
+
+    rest=pd.DataFrame()
+    rest=pd.DataFrame(columns=x.columns, index=data.index)
+    rest=rest.fillna(0) 
+    ind=[]
+    li2=list(x.columns)
+    for i in range(len(data)):
+        c=data['fileNames'][i]
+        cd=Diff_and(c, li2)
+        print(len(cd))
+        if(len(cd)>0):
+            for j in range(len(c)):
+                    rest.loc[i,c[j].strip()]=1
+        else:
+            ind.append(i)
+            
+            
+    rest=rest.drop(index=ind,axis=0)
+    rest=rest.reset_index(drop=True)
+
+
+    li1 = list(rest.columns)
+    li2 =list( x.columns)
+    cd=Diff(li1, li2)
+    rest=rest.drop(cd,axis=1)
+    test=rest[x.columns]
+    test=test.fillna(0)
+
+#test.loc[:,'.../src/main/resources/application.properties']
+#
+#p='.../src/main/resources/application.properties'
+#q='.../src/main/java/app/utils/JiraUtils.java'
+    return test
+
+
+data_defect_df=Getting_defect_info(data_df)
+
+jira_db_defects_merge=Merge_Jira_data_df(jira_df,data_defect_df)
+
+Total_defects_Jira_Git=Defects_from_Jira_Git(jira_db_defects_merge,git_df)
+
+Total_defects_Db_Jira_Git=Defects_from_Jira_Git_DB(git_df,data_defect_df,Total_defects_Jira_Git)
+
+final_defects_data=Defects_Preprocessing(Total_defects_Db_Jira_Git)
+
+x,y=train_preprocess(final_defects_data)
+
+test_git_df=git_test[['fileNames','timeStamp']]
+
+test_data=test_data_preprocessed(test_git_df,x,y)
+
+
+#f=[]
+#a='DotCom_B2E_HomeLogin_NVP_CPC_Start_ImmediateBill_CPC-MixMatch_SeeDetails'
+#f.append(a)
+#len(f)
+#ts=list(y.columns)
+#
+#
+#cd=Diff_and(f,ts)
+#
+#dum=x[x['.../src/main/resources/application.properties']==1]
+#
+#
+#test_failure=[]
+#for i in range(len(dum)):
+#    test_1=list(dum.columns)
+#    for j in range(len(test_1)):
+#        if(dum.iloc[i,j]==1):
+#            test_failure.append(test_1[j])
+
+from sklearn.ensemble import RandomForestClassifier
+regressor =RandomForestClassifier(n_estimators=30)
+from imblearn.over_sampling import RandomOverSampler
+sm = RandomOverSampler(random_state=0)
+#from sklearn.model_selection import train_test_split
+#from sklearn.naive_bayes import GaussianNB
+#gnb = GaussianNB()
+#from sklearn.svm import SVC
+#clf = SVC(gamma='auto')
+#from sklearn.linear_model import LogisticRegression
+#x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.33, random_state=42)
+categories=y.columns
+result=pd.DataFrame()
+result_df=pd.DataFrame(columns=y.columns, index=test_data.index)
+i=0
+#p=y[a]
+#c=p.sum()
+#mn=x.loc[132:,:]
+#if((c!=0) & (c!=len(p))):
+##    x_1, y_1 = sm.fit_sample(x,p)
+##    clf = LogisticRegression(random_state=0, solver='lbfgs',multi_class='multinomial').fit(x,p)
+#    regressor.fit(x,p)
+#    prediction=regressor.predict(mn) 
+
+for category in categories:
+    print(i)
+    p=y[category]
+    c=p.sum()
+    if((c!=0) & (c!=len(p))):
+        x_1, y_1 = sm.fit_sample(x,y[category])
+        regressor.fit(x_1, y_1)
+#    prediction = regressor.predict(x)
+        prediction=regressor.predict(test_data)
+#        prediction=regressor.predict(mn) 
+#    prob=prediction[:,1:]
+    
+        result_df[category]=prediction
+        i=i+1
+    else:
+        result_df[category]=0
+        i=i+1
+    
+col=result_df.columns
+test_failure=[]
+for i in range(len(result_df)):
+    for j in range(len(col)):
+        if(result_df.iloc[i,j]==1):
+            test_failure.append(col[j])
+#
+            
+model_1_results = list(dict.fromkeys(test_failure))
+
+model_1=pd.DataFrame(data=model_1_results)
+#model_1.to_csv('E:/model_1.csv',index=False)
+#
+#print("Code Completed")
+
+
+
+from flask import Flask, render_template 
+  
+# declaring app name 
+app = Flask(__name__) 
+  
+Test_cases=model_1_results
+# defining home page 
+@app.route('/') 
+def homepage(): 
+  
+# returning index.html and list 
+# and length of list to html page 
+    return render_template("index.html", len = len(Test_cases), Test_cases = Test_cases) 
+  
+if __name__ == '__main__': 
+    app.run(host='10.119.9.88',port='80') 
+
+
+
+
+
+
+
+
+
+
+#from pymongo import MongoClient
+#
+#client = MongoClient('mongodb://TapsiumUser:Tapsium%40123@10.119.11.192',5005)
+#
+#db = client.TQA
+#collection = db.UserScenarios_SR
+##
+#for i in range(len(model_1_results)):
+#    print(i)
+#    myquery={'UserId':'Virtual_SmartRegression','ScenarioDescription': model_1_results[i]}
+#    newvalues = { "$set": { "Priority": "Medium" } }
+#    collection.update_one(myquery, newvalues)
+##    
+#prior=pd.DataFrame(list(collection.find())) 
